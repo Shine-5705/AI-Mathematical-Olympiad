@@ -10,3 +10,5 @@ sympy
 tqdm
 transformers
 torch
+peft
+accelerate

@@ -1,24 +1,18 @@
 # Deductive-State MCTS for Mathematical Reasoning
 
-MCTS-based math solver that uses symbolic verification to prune invalid reasoning paths. Unlike standard Chain-of-Thought, this system explores multiple solution branches and kills mathematically inconsistent ones early.
+Fine-tune NuminaMath (2024) on OpenMathReasoning (2026) + MCTS search with symbolic verification.
 
 ## Setup
 
 ```bash
-# Clone and enter directory
-cd AI-Mathematical-Olympiad
-
-# Mac (Apple Silicon)
+# Mac
 pip install -r requirements-mac.txt
 
-# Linux/Windows (NVIDIA GPU)
+# Linux/Windows with NVIDIA GPU
 pip install -r requirements-cuda.txt
-
-# CPU only
-pip install -r requirements.txt
 ```
 
-## Quick Start
+## Training
 
 ### 1. Download Dataset
 
@@ -26,87 +20,60 @@ pip install -r requirements.txt
 python -m src.data.pipeline
 ```
 
-This downloads NVIDIA OpenMathReasoning dataset and saves to `data/processed/math_reasoning_tir.parquet`.
-
-### 2. Run Single Problem
+### 2. Fine-tune NuminaMath on OpenMathReasoning
 
 ```bash
-python main.py
+# Full training
+python train.py --data data/processed/math_reasoning_tir.parquet --epochs 3
+
+# Quick test (100 examples)
+python train.py --data data/processed/math_reasoning_tir.parquet --limit 100 --epochs 1
 ```
+
+Model saves to `models/numina-openmath/lora_adapter`.
 
 ### 3. Run Experiments
 
 ```bash
-# Basic run (10 problems, auto-detect backend)
-python run_experiment.py --limit 10
+# With your trained model
+python run_experiment.py --model models/numina-openmath/lora_adapter --limit 10
 
-# Compare all methods
-python run_experiment.py --methods direct cot mcts mcts_no_verify --limit 20
-
-# Use specific backend
-python run_experiment.py --backend vllm --limit 10      # NVIDIA GPU
-python run_experiment.py --backend mlx --limit 10       # Mac (quantized)
-python run_experiment.py --backend transformers --limit 10  # Any platform
-
-# Use specific model
-python run_experiment.py --backend transformers --model AI-MO/NuminaMath-7B-TIR --limit 10
+# Compare methods
+python run_experiment.py --methods direct cot mcts --limit 20
 ```
 
-Results save to `experiments/` as JSON.
+## What This Does
+
+```
+NuminaMath-7B-TIR (2024)     →  Strong math reasoning base
+        +
+OpenMathReasoning (2026)    →  Latest competition-style problems
+        +
+MCTS + Symbolic Verification →  Search algorithm that prunes bad reasoning
+        =
+Your trained model that outperforms either alone
+```
 
 ## Project Structure
 
 ```
-├── main.py                 # Single problem test
-├── run_experiment.py       # Full experiment runner
+├── train.py              # Training script
+├── run_experiment.py     # Evaluation script
+├── main.py               # Quick test
+├── models/               # Trained models
 ├── src/
-│   ├── data/
-│   │   └── pipeline.py     # Dataset ETL
-│   ├── evaluation/
-│   │   ├── metrics.py      # Answer extraction & comparison
-│   │   └── runner.py       # Experiment orchestration
-│   └── search/
-│       ├── baselines.py    # Direct, CoT, Self-Consistency
-│       ├── generator.py    # LLM backends (transformers/mlx/vllm)
-│       ├── mcts.py         # MCTS algorithm
-│       └── verifier.py     # Symbolic & code verification
-├── data/processed/         # Processed datasets
-└── experiments/            # Experiment results
+│   ├── data/pipeline.py  # Dataset ETL
+│   ├── training/         # Fine-tuning code
+│   ├── evaluation/       # Metrics & runner
+│   └── search/           # MCTS, generators, verifiers
+└── experiments/          # Results
 ```
 
-## Methods
+## Commands
 
-| Method | Description |
-|--------|-------------|
-| `direct` | Single-shot prompting |
-| `cot` | Chain-of-thought (linear) |
-| `self_consistency` | Majority voting over samples |
-| `mcts` | MCTS + symbolic verification |
-| `mcts_no_verify` | MCTS without verification (ablation) |
-
-## Backends
-
-| Backend | Platform | Default Model | RAM |
-|---------|----------|---------------|-----|
-| `transformers` | Any | NuminaMath-7B-TIR | ~16GB |
-| `mlx` | Mac M-series | Qwen2.5-Math-7B-4bit | ~8GB |
-| `vllm` | NVIDIA GPU | NuminaMath-7B-TIR | ~16GB |
-
-## Metrics Collected
-
-- **Accuracy**: % correct answers
-- **Tokens**: Total tokens generated
-- **Time**: Solve time per problem
-- **Prune Rate**: % branches killed by verifier (MCTS only)
-
-## Python API
-
-```python
-from src.search import AIMO_MCTS
-
-engine = AIMO_MCTS(backend="transformers", verify_mode="symbolic")
-solution = engine.search("Find all integers n such that n^2 + 1 divides n^3 + 1", iterations=10)
-
-print(solution)
-print(engine.get_metrics())
-```
+| Task | Command |
+|------|---------|
+| Download data | `python -m src.data.pipeline` |
+| Train model | `python train.py --epochs 3` |
+| Run experiments | `python run_experiment.py --limit 10` |
+| Quick test | `python main.py` |
