@@ -1,0 +1,10 @@
+pandas
+pyarrow
+fastparquet
+datasets
+huggingface-hub
+python-dotenv
+tqdm
+fsspec
+ipykernel
+matplotlib
