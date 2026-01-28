@@ -1,7 +1,7 @@
 [project]
 name = "ai-mathematical-olympiad"
 version = "0.1.0"
-description = "Add your description here"
+description = "MCTS-based math solver with symbolic verification"
 readme = "README.md"
 requires-python = ">=3.11"
 dependencies = [
@@ -11,8 +11,11 @@ dependencies = [
     "huggingface-hub>=1.3.4",
     "ipykernel>=7.1.0",
     "matplotlib>=3.10.8",
+    "numpy>=2.0.0",
     "pandas>=3.0.0",
     "pyarrow>=23.0.0",
     "python-dotenv>=1.2.1",
+    "sympy>=1.13.0",
     "tqdm>=4.67.1",
+    "vllm>=0.6.0",
 ]
