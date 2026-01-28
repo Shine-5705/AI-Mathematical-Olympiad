@@ -2,12 +2,11 @@ datasets
 fastparquet
 fsspec
 huggingface-hub
-ipykernel
-matplotlib
 numpy
 pandas
 pyarrow
 python-dotenv
 sympy
 tqdm
-vllm
+transformers
+torch
