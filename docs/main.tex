@@ -1,0 +1,561 @@
+\documentclass[11pt,a4paper]{article}
+
+% --- Packages ---
+\usepackage[utf8]{inputenc}
+\usepackage[T1]{fontenc}
+\usepackage{amsmath,amssymb,amsthm}
+\usepackage{graphicx}
+\usepackage{booktabs}
+\usepackage{multirow}
+\usepackage{hyperref}
+\usepackage{algorithm}
+\usepackage{algorithmic}
+\usepackage{xcolor}
+\usepackage{subcaption}
+\usepackage[margin=1in]{geometry}
+\usepackage{listings}
+\usepackage{natbib}
+
+\title{Deductive-State MCTS with Symbolic Verification\\for Mathematical Reasoning}
+\author{
+    Author Name\\
+    Affiliation\\
+    \texttt{email@example.com}
+}
+\date{}
+
+\begin{document}
+\maketitle
+
+% ===========================================================================
+% ABSTRACT (~200 words)
+% ===========================================================================
+\begin{abstract}
+
+% WHAT: One sentence on the problem
+Large language models for mathematical reasoning frequently produce solutions
+containing symbolic contradictions and code execution errors that go undetected
+during standard supervised fine-tuning.
+
+% HOW: Two sentences on the method
+We propose Deductive-State Monte Carlo Tree Search (DS-MCTS), a training and
+inference framework that integrates symbolic verification (SymPy) and code
+execution checking into the MCTS search process. Invalid reasoning branches
+are pruned during tree expansion, and only verified solutions are used for
+fine-tuning via rejection sampling.
+
+% RESULTS: Two sentences on findings
+We evaluate DS-MCTS across three 7B-parameter base models (NuminaMath-7B-TIR,
+OpenMath-Nemotron-7B, Qwen2.5-Math-7B-Instruct) on the OpenMathReasoning
+benchmark. Our method achieves [X]\% accuracy improvement over SFT baselines,
+with the symbolic+code composite verifier pruning [X]\% of erroneous branches,
+and the largest gains observed on olympiad-level problems where verification
+catches [X]\% more errors than on routine algebra.
+
+% AVAILABILITY
+All code, trained adapters, and experimental results are publicly available.
+
+\end{abstract}
+
+% ===========================================================================
+% 1. INTRODUCTION (1.5-2 pages)
+% ===========================================================================
+\section{Introduction}
+
+% Paragraph 1: The problem landscape
+% - LLMs are getting good at math (cite GPT-4, Gemini, etc.)
+% - Competition results: AIMO Progress Prize, Numina's win, NVIDIA's win
+% - But: models still make errors that a symbolic checker could catch
+%   (e.g., claiming x=5 then using x=3 two steps later)
+
+% Paragraph 2: Why current approaches fall short
+% - Standard SFT trains on all solutions equally, including flawed ones
+% - Chain-of-thought prompting has no verification mechanism
+% - Self-consistency (majority voting) doesn't catch systematic errors
+% - Tool-integrated reasoning (TIR) executes code but doesn't verify
+%   symbolic consistency across reasoning steps
+
+% Paragraph 3: Our approach
+% - MCTS for structured exploration of solution space
+% - Symbolic verifier (SymPy) catches equation contradictions
+% - Code execution verifier catches runtime errors in TIR code blocks
+% - Composite verification during tree expansion = early pruning
+% - Training: SFT first, then MCTS-RL (fine-tune on verified solutions only)
+
+% Paragraph 4: Contributions (numbered list)
+% 1. DS-MCTS: MCTS with integrated symbolic + code verification for math reasoning
+% 2. Systematic comparison across 3 base models showing generalizability
+% 3. Comprehensive ablation of verification components, MCTS hyperparameters,
+%    and problem categories
+% 4. Analysis of when and why tree-based verification helps (hard > easy problems)
+
+% Paragraph 5: Paper organization
+% Section 2: Related Work, Section 3: Method, Section 4: Experimental Setup,
+% Section 5: Results, Section 6: Analysis, Section 7: Conclusion
+
+
+% ===========================================================================
+% 2. RELATED WORK (1.5 pages)
+% ===========================================================================
+\section{Related Work}
+
+\subsection{Mathematical Reasoning with LLMs}
+% - Chain-of-thought prompting (Wei et al., 2022)
+% - Tool-integrated reasoning: NuminaMath (Li et al., 2024), using code execution
+%   within reasoning chains
+% - OpenMathReasoning dataset (NVIDIA, 2025) — 1.7M TIR solutions
+% - Self-consistency / majority voting (Wang et al., 2023)
+% - Reward models / process reward models for math (Lightman et al., 2023)
+
+\subsection{Monte Carlo Tree Search for LLMs}
+% - MCTS for code generation (Zhang et al., 2023)
+% - AlphaProof and DeepMind's approach to IMO problems
+% - Tree-of-thought prompting (Yao et al., 2023) — related but not full MCTS
+% - MCTS with value functions vs our approach with symbolic verification
+%   (we don't need a learned value function — the verifier IS the value signal)
+
+\subsection{Formal and Symbolic Verification}
+% - Lean/Isabelle for formal proofs — heavyweight, limited coverage
+% - SymPy for lightweight equation checking — our approach
+% - Code execution as verification (TIR format already does this partially)
+% - Our contribution: combining symbolic + code verification in MCTS specifically
+
+
+% ===========================================================================
+% 3. METHOD (3-4 pages — the core of the paper)
+% ===========================================================================
+\section{Method}
+
+\subsection{Overview}
+% Figure 1: Full pipeline diagram
+% problem -> MCTS tree -> [verifier checks each node] -> best verified path -> answer
+%
+% Two-phase approach:
+% Phase 1: SFT on OpenMathReasoning (standard baseline)
+% Phase 2: MCTS-RL — generate with MCTS, verify, fine-tune on verified solutions
+
+\subsection{Deductive-State MCTS}
+
+% Definition of "deductive state": the accumulated reasoning text at any tree node,
+% which includes all prior reasoning steps, code blocks, and intermediate results.
+% Unlike standard MCTS for games, our states are variable-length text sequences.
+
+\subsubsection{Tree Structure}
+% - Root node: problem statement
+% - Each node: accumulated reasoning text (parent text + new continuation)
+% - Children: candidate continuations generated by the LLM
+% - Node metadata: visit count, value, depth, verification status
+
+\subsubsection{Selection (UCT)}
+% - Standard UCT: value/visits + c * sqrt(ln(parent_visits) / visits)
+% - c is configurable (we ablate: 0.5, 1.0, 1.41, 2.0)
+% - Unvisited nodes get infinite UCT (explored first)
+
+% UCT formula:
+% \begin{equation}
+% \text{UCT}(n) = \frac{V(n)}{N(n)} + c \sqrt{\frac{\ln N(\text{parent}(n))}{N(n)}}
+% \end{equation}
+
+\subsubsection{Expansion with Verification}
+% This is the KEY CONTRIBUTION.
+% Standard MCTS: expand node, add all children.
+% Our MCTS: expand node, VERIFY each candidate, only add valid ones.
+%
+% Algorithm:
+% 1. Generate N candidate continuations from LLM
+% 2. For each candidate:
+%    a. Run SymbolicVerifier: parse $...$ equations, check for contradictions
+%    b. Run CodeExecutionVerifier: extract ```python blocks, execute in sandbox
+%    c. If either fails: PRUNE (don't add to tree)
+%    d. If both pass: add as child node
+%
+% This is where the pruning happens. Invalid branches are eliminated EARLY,
+% before the tree wastes iterations exploring them.
+
+% Algorithm 1: DS-MCTS pseudocode
+% \begin{algorithm}
+% \caption{Deductive-State MCTS with Verification}
+% \begin{algorithmic}
+% \STATE \textbf{Input:} problem $p$, generator $G$, verifier $V$, iterations $T$
+% \STATE root $\leftarrow$ Node($p$)
+% \FOR{$t = 1$ to $T$}
+%   \STATE node $\leftarrow$ SELECT(root) \COMMENT{UCT traversal}
+%   \STATE candidates $\leftarrow$ $G$.generate(node.state, $n$)
+%   \FOR{each candidate $c$ in candidates}
+%     \STATE valid, reason $\leftarrow$ $V$.verify($c$)
+%     \IF{valid}
+%       \STATE node.children.append(Node(node.state + $c$))
+%     \ENDIF
+%   \ENDFOR
+%   \STATE reward $\leftarrow$ SCORE(node.state)
+%   \STATE BACKPROPAGATE(node, reward)
+% \ENDFOR
+% \STATE \textbf{return} most-visited leaf path
+% \end{algorithmic}
+% \end{algorithm}
+
+\subsubsection{Scoring Function}
+% TIR-aware scoring (not just "has answer"):
+% - 1.0: solution contains \boxed{} (complete answer found)
+% - 0.5: has ```python + ```output (code was executed, partial progress)
+% - 0.3: has ```python (code written but not yet executed)
+% - 0.1: reasoning text only (just started)
+%
+% This guides MCTS toward solutions that actually execute code
+% and reach a final answer.
+
+\subsubsection{Backpropagation}
+% Standard: propagate reward up to root, increment visit counts.
+% The verified-only expansion means high-value paths are more likely
+% to be symbolically consistent.
+
+\subsection{Verification Components}
+
+\subsubsection{Symbolic Verifier (SymPy)}
+% Parses the reasoning text for:
+% 1. $...$ inline LaTeX equations containing "="
+%    - Splits on "=", sends both sides to SymPy
+%    - If simplify(LHS - RHS) != 0 and is numeric: CONTRADICTION
+%    - Example: "we get $x = 5$" then later "$x = 3$"
+% 2. \boxed{} answers containing equations
+%    - Same check: if the boxed expression is self-contradictory
+%
+% Handles edge cases:
+% - Skips "!=" and "\neq" (intentional inequalities)
+% - Skips expressions SymPy can't parse (graceful degradation)
+% - Only flags numeric contradictions (symbolic variables are left alone)
+
+\subsubsection{Code Execution Verifier}
+% Extracts ```python ... ``` blocks from TIR reasoning.
+% Executes each in a subprocess with timeout (default 10s).
+% Checks:
+% - returncode != 0 → runtime error → PRUNE
+% - TimeoutExpired → infinite loop → PRUNE
+% - Success → code block is valid
+%
+% Security: subprocess isolation, no network access, timeout kills.
+
+\subsubsection{Composite Verifier}
+% Runs both verifiers sequentially.
+% Fails if EITHER fails.
+% We ablate: none, symbolic-only, code-only, both.
+
+\subsection{Training Pipeline}
+
+\subsubsection{Phase 1: Supervised Fine-Tuning (SFT)}
+% Standard SFT on OpenMathReasoning TIR split.
+% Data format: messages = [{system}, {user: problem}, {assistant: solution}]
+% Formatted via tokenizer.apply_chat_template()
+% LoRA: r=16, alpha=32, targets: q_proj, k_proj, v_proj, o_proj
+% This is the BASELINE — what Numina and NVIDIA already demonstrated works.
+
+\subsubsection{Phase 2: MCTS-RL Fine-Tuning}
+% OUR CONTRIBUTION.
+% 1. Take SFT model as starting point
+% 2. For each problem in training set:
+%    - Run DS-MCTS to generate multiple solution paths
+%    - Verify each with composite verifier
+%    - Keep only solutions that: (a) reach \boxed{}, (b) pass verification
+% 3. Fine-tune SFT model on verified solutions only
+%    - New LoRA adapter (r=8, lower rank for refinement)
+%    - Fewer epochs (2) — don't want to overfit to MCTS style
+%
+% Key insight: SFT trains on ALL solutions (including flawed ones).
+% MCTS-RL trains on ONLY verified solutions.
+% The model learns to avoid symbolic contradictions and code errors.
+
+
+% ===========================================================================
+% 4. EXPERIMENTAL SETUP (1-1.5 pages)
+% ===========================================================================
+\section{Experimental Setup}
+
+\subsection{Models}
+% Three 7B-parameter base models:
+%
+% | Model                    | Source     | Pre-training                              |
+% |--------------------------|-----------|-------------------------------------------|
+% | NuminaMath-7B-TIR        | Numina    | Fine-tuned for TIR on competition math    |
+% | OpenMath-Nemotron-7B     | NVIDIA    | Fine-tuned on OpenMathReasoning           |
+% | Qwen2.5-Math-7B-Instruct | Alibaba  | Math instruction-tuned (no TIR-specific)  |
+%
+% All loaded with 4-bit quantization (QLoRA on NVIDIA, MLX on Mac).
+% LoRA adapters: r=16 for SFT, r=8 for MCTS-RL.
+
+\subsection{Dataset}
+% OpenMathReasoning TIR split (NVIDIA, 2025)
+% - 1.7M TIR-format solutions
+% - Problems from AoPS forums and MATH training set
+% - Each solution contains reasoning + python code blocks + \boxed{} answer
+%
+% Splits:
+% - Training: [N] problems (used for SFT and MCTS-RL)
+% - Evaluation: [N] problems stratified by category and difficulty
+%
+% Categories (derived from problem_source):
+% - Algebra, Olympiad, College, Competition
+%
+% Difficulty tiers (derived from pass_rate_72b_tir):
+% - Easy (>70% pass rate), Medium (30-70%), Hard (<30%)
+
+\subsection{Evaluation Metrics}
+% - Accuracy: exact match after normalization (primary metric)
+% - Answer extraction: \boxed{} first, then fallback patterns
+% - Numeric tolerance: |pred - expected| < 1e-6
+% - Prune rate: fraction of candidates rejected by verifier
+% - Token efficiency: accuracy per token generated
+% - Solve time: wall clock time per problem
+
+\subsection{MCTS Configuration}
+% Default settings (used unless stated otherwise):
+% - Iterations: 10
+% - Max depth: 10
+% - Candidates per node: 3
+% - UCT constant: 1.41
+% - Verifier: composite (symbolic + code)
+% - Code execution timeout: 10 seconds
+
+\subsection{Hardware}
+% - Mac Mini M4 16GB: MLX 4-bit inference and training
+% - Linux with NVIDIA RTX 3060 12GB: QLoRA training and inference
+% - Report training time and peak memory for reproducibility
+
+
+% ===========================================================================
+% 5. RESULTS (3-4 pages — tables and figures)
+% ===========================================================================
+\section{Results}
+
+\subsection{Base Model Comparison}
+% TABLE 1: 3 models x 3 stages
+%
+% \begin{table}[h]
+% \centering
+% \caption{Accuracy (\%) across base models and training stages.
+%          Best result per model in \textbf{bold}.}
+% \begin{tabular}{lccc}
+% \toprule
+%                & NuminaMath-7B & OpenMath-Nemotron-7B & Qwen2.5-Math-7B \\
+% \midrule
+% Base           &               &                      &                 \\
+% + SFT          &               &                      &                 \\
+% + MCTS-RL      &               &                      &                 \\
+% \bottomrule
+% \end{tabular}
+% \end{table}
+%
+% Discussion points:
+% - Does MCTS-RL improve all 3 models? (generalizability claim)
+% - How much does SFT help OpenMath-Nemotron? (already trained on this data)
+% - Which base model benefits most from MCTS-RL?
+% - Absolute accuracy numbers vs compute spent
+
+\subsection{Verifier Ablation}
+% TABLE 2: 4 verifier modes on best model
+%
+% \begin{table}[h]
+% \centering
+% \caption{Ablation of verification components during MCTS.}
+% \begin{tabular}{lcccc}
+% \toprule
+% Verifier     & Accuracy & Prune Rate & Avg Depth & Avg Tokens \\
+% \midrule
+% None         &          &            &           &            \\
+% Symbolic     &          &            &           &            \\
+% Code         &          &            &           &            \\
+% Both (ours)  &          &            &           &            \\
+% \bottomrule
+% \end{tabular}
+% \end{table}
+%
+% Discussion:
+% - Does symbolic verification help independently?
+% - Does code execution verification help independently?
+% - Is the composite better than either alone?
+% - What's the compute overhead of verification vs accuracy gain?
+
+\subsection{MCTS Hyperparameter Analysis}
+% FIGURE 2: Four line charts (2x2 grid)
+%   (a) Accuracy vs max depth [5, 10, 15, 20]
+%   (b) Accuracy vs branching factor [2, 3, 5]
+%   (c) Accuracy vs UCT constant [0.5, 1.0, 1.41, 2.0]
+%   (d) Accuracy vs iterations [5, 10, 20, 50]
+%
+% Key findings:
+% - Diminishing returns after depth X
+% - Branching factor N is optimal (balance explore vs compute)
+% - UCT constant: 1.41 (sqrt(2)) is standard, does our domain prefer different?
+% - More iterations always help but marginal gain decreases
+
+\subsection{Per-Category Results}
+% TABLE 3: Best model broken down by category
+%
+% \begin{table}[h]
+% \centering
+% \caption{Accuracy (\%) by problem category.}
+% \begin{tabular}{lcccc}
+% \toprule
+%          & Algebra & Olympiad & College & Competition \\
+% \midrule
+% Base     &         &          &         &             \\
+% SFT      &         &          &         &             \\
+% MCTS-RL  &         &          &         &             \\
+% \bottomrule
+% \end{tabular}
+% \end{table}
+
+% TABLE 4: By difficulty tier
+%
+% \begin{table}[h]
+% \centering
+% \caption{Accuracy (\%) by difficulty tier.}
+% \begin{tabular}{lccc}
+% \toprule
+%          & Easy & Medium & Hard \\
+% \midrule
+% Base     &      &        &      \\
+% SFT      &      &        &      \\
+% MCTS-RL  &      &        &      \\
+% \bottomrule
+% \end{tabular}
+% \end{table}
+%
+% KEY HYPOTHESIS: MCTS-RL should help most on hard problems.
+% On easy problems, the base model already gets them right, so verification
+% doesn't add much. On hard problems, the model makes more errors, and
+% the verifier catches more of them — leading to bigger improvement.
+
+
+% ===========================================================================
+% 6. ANALYSIS (2-3 pages — the depth that makes the paper strong)
+% ===========================================================================
+\section{Analysis}
+
+\subsection{What Does the Verifier Catch?}
+% Categorize pruned nodes by failure type:
+% - Symbolic contradictions (equation LHS != RHS)
+% - Code runtime errors (NameError, TypeError, etc.)
+% - Code timeout (infinite loops)
+% - Code wrong output (runs but produces wrong intermediate result)
+%
+% FIGURE 3: Pie chart or bar chart of failure type distribution
+%
+% Examples (2-3 cherry-picked):
+% Show a reasoning trace where the model claims "x = 5" then computes
+% "2x = 12" — caught by symbolic verifier.
+% Show a code block with an off-by-one error — caught by code verifier.
+
+\subsection{MCTS Tree Structure Analysis}
+% FIGURE 4: Example solution trees (2-3 problems)
+% Show the actual tree with nodes colored by:
+% - Green: valid, high reward
+% - Red: pruned by verifier
+% - Yellow: valid but low reward
+% - Blue: final answer node
+%
+% Statistics:
+% - Average effective branching factor (after pruning)
+% - Average depth of solution nodes vs pruned nodes
+% - Do deeper trees correlate with harder problems?
+
+\subsection{Token Efficiency}
+% FIGURE 5: Scatter plot — accuracy vs total tokens generated
+% Compare: Base (greedy) vs SFT (greedy) vs MCTS-RL
+%
+% MCTS generates more tokens (multiple candidates per node), but:
+% - Better accuracy per problem
+% - Fewer WASTED tokens (pruned branches aren't fully expanded)
+% - What's the accuracy-per-token tradeoff?
+
+\subsection{When Does MCTS Hurt?}
+% Important for honest paper: when does verification NOT help?
+% - Very easy problems: base model already correct, MCTS is overhead
+% - Problems where SymPy can't parse the math (non-standard notation)
+% - Problems with no code blocks (pure reasoning, code verifier useless)
+% - Short solutions: not enough intermediate steps to verify
+%
+% This section strengthens the paper by showing awareness of limitations.
+
+\subsection{Comparison with Self-Consistency}
+% Self-consistency (majority voting over N samples) is the main alternative
+% to MCTS for improving LLM reasoning.
+%
+% Key difference: self-consistency generates N independent solutions and votes.
+% MCTS explores a TREE — later nodes are informed by earlier verification.
+%
+% If compute budget is equal (same number of LLM calls):
+% - Self-consistency: N independent full solutions
+% - MCTS: explores tree with pruning, may find answer faster
+%
+% TABLE 5: MCTS vs Self-Consistency (same compute budget)
+% | Method              | Accuracy | Tokens | Time |
+% | Self-Consistency@8  |          |        |      |
+% | Self-Consistency@32 |          |        |      |
+% | DS-MCTS (ours)      |          |        |      |
+
+
+% ===========================================================================
+% 7. DISCUSSION (0.5-1 page)
+% ===========================================================================
+\section{Discussion}
+
+% Paragraph 1: Summary of key findings
+% - MCTS-RL improves accuracy across all/most base models
+% - Composite verification is better than either component alone
+% - Gains are largest on hard problems (where errors are most common)
+
+% Paragraph 2: Practical implications
+% - This is a training-time improvement (MCTS-RL), not just inference-time
+% - The MCTS-RL model is better even WITHOUT MCTS at inference time
+%   (it learned to avoid the error patterns the verifier catches)
+% - Verification is lightweight (SymPy + subprocess) vs heavyweight (Lean/Isabelle)
+
+% Paragraph 3: Limitations
+% - 7B models only — unclear if this scales to 70B+
+% - SymPy can only verify equations it can parse
+% - Code verifier needs well-formatted ```python blocks
+% - MCTS is slower than greedy generation
+% - Evaluation on OpenMathReasoning only — need more benchmarks
+
+% Paragraph 4: Future work
+% - Process reward models as additional verification signal
+% - Scaling to larger models
+% - Applying to other STEM domains (physics, chemistry)
+% - Learning the UCT constant per problem type
+% - Formal verification (Lean) for high-confidence answers
+
+
+% ===========================================================================
+% 8. CONCLUSION (0.5 page)
+% ===========================================================================
+\section{Conclusion}
+
+% Restate the contribution in 2-3 sentences.
+% Restate the key result (X% improvement).
+% One sentence on broader impact: lightweight verification can improve
+% LLM reasoning without heavyweight formal proof systems.
+
+
+% ===========================================================================
+% REFERENCES
+% ===========================================================================
+\bibliographystyle{plainnat}
+% \bibliography{references}
+
+% Placeholder references — replace with actual .bib entries
+% Key papers to cite:
+%
+% @article{numina2024,          title={NuminaMath}, ...}
+% @article{openmath2025,        title={OpenMathReasoning}, ...}
+% @article{wei2022cot,          title={Chain-of-Thought Prompting}, ...}
+% @article{wang2023selfcons,    title={Self-Consistency}, ...}
+% @article{yao2023tot,          title={Tree of Thoughts}, ...}
+% @article{lightman2023prm,     title={Process Reward Models}, ...}
+% @article{alphaproof2024,      title={AlphaProof}, ...}
+% @article{qwen2024math,        title={Qwen2.5-Math}, ...}
+% @article{hu2021lora,          title={LoRA}, ...}
+% @article{dettmers2023qlora,   title={QLoRA}, ...}
+% @article{coulom2006mcts,      title={Efficient Selectivity and Backup Operators in MCTS}, ...}
+% @article{kocsis2006uct,       title={Bandit Based Monte-Carlo Planning}, ...}
+
+\end{document}
