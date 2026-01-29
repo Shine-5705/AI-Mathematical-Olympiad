@@ -77,6 +77,29 @@ Compares three models head-to-head:
 - `SFT` — fine-tuned on OpenMathReasoning
 - `MCTS-RL (ours)` — fine-tuned with verified MCTS solutions
 
+## Data Format
+
+The pipeline downloads [nvidia/OpenMathReasoning](https://huggingface.co/datasets/nvidia/OpenMathReasoning) (TIR split: 1.7M examples) and transforms it for training.
+
+**Source columns** (from HuggingFace):
+| Column | Description |
+|--------|-------------|
+| `problem` | Math problem statement |
+| `generated_solution` | TIR-format solution (reasoning + `\`\`\`python` code blocks + `\boxed{}` answer) |
+| `expected_answer` | Ground truth answer |
+| `problem_source` | Origin forum (e.g. `aops_c6_high_school_olympiads`) |
+
+**Output columns** (after pipeline):
+| Column | Description |
+|--------|-------------|
+| `problem` | Problem text |
+| `solution` | Raw TIR solution |
+| `expected_answer` | Ground truth |
+| `difficulty` | Mapped from `problem_source` |
+| `messages` | Chat format: `[{role: system}, {role: user, content: problem}, {role: assistant, content: solution}]` |
+
+The `messages` column is used by trainers with `tokenizer.apply_chat_template()`. The raw `problem`/`expected_answer` columns are used by the evaluation runner.
+
 ## Platform Summary
 
 | Platform | Model | Quantization | RAM/VRAM |
