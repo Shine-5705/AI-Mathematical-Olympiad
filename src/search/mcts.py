@@ -1,7 +1,9 @@
+"""MCTS for TIR-format mathematical reasoning."""
 import math
+import re
 import time
 from typing import List, Optional
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 
 from src.search.generator import BaseGenerator, create_generator
 from src.search.verifier import BaseVerifier, create_verifier
@@ -9,7 +11,6 @@ from src.search.verifier import BaseVerifier, create_verifier
 
 @dataclass
 class MCTSMetrics:
-    """Tracks MCTS search metrics for experiments."""
     total_nodes: int = 0
     pruned_nodes: int = 0
     total_tokens: int = 0
@@ -18,9 +19,7 @@ class MCTSMetrics:
 
     @property
     def prune_rate(self) -> float:
-        if self.total_nodes == 0:
-            return 0.0
-        return self.pruned_nodes / self.total_nodes
+        return self.pruned_nodes / self.total_nodes if self.total_nodes else 0.0
 
     def to_dict(self) -> dict:
         return {
@@ -34,8 +33,6 @@ class MCTSMetrics:
 
 
 class MCTSNode:
-    """Node in the MCTS tree representing a solution state."""
-
     def __init__(self, state: str, parent: Optional["MCTSNode"] = None):
         self.state = state
         self.parent = parent
@@ -44,18 +41,13 @@ class MCTSNode:
         self.value: float = 0.0
 
     def uct(self, c: float = 1.41) -> float:
-        """Calculate Upper Confidence Bound for Trees score."""
         if self.visits == 0:
             return float('inf')
-        exploitation = self.value / self.visits
-        exploration = c * math.sqrt(math.log(self.parent.visits) / self.visits)
-        return exploitation + exploration
+        return (self.value / self.visits) + c * math.sqrt(math.log(self.parent.visits) / self.visits)
 
     @property
     def depth(self) -> int:
-        """Return depth of this node in the tree."""
-        d = 0
-        node = self
+        d, node = 0, self
         while node.parent:
             d += 1
             node = node.parent
@@ -63,7 +55,7 @@ class MCTSNode:
 
 
 class AIMO_MCTS:
-    """MCTS orchestrator combining neural generation with symbolic verification."""
+    """MCTS with symbolic verification for TIR math reasoning."""
 
     def __init__(
         self,
@@ -84,93 +76,68 @@ class AIMO_MCTS:
         max_depth: int = 10,
         candidates_per_node: int = 3,
     ) -> str:
-        """Run MCTS search to find the best verified solution."""
+        """Run MCTS search for a verified solution."""
         self.metrics = MCTSMetrics()
-        start_time = time.time()
+        start = time.time()
 
-        root = MCTSNode(state=self._format_prompt(problem))
+        root = MCTSNode(state=problem)
 
         for i in range(iterations):
-            node = self._select(root)
+            # Select
+            node = root
+            while node.children:
+                node = max(node.children, key=lambda c: c.uct())
 
+            # Expand
             if node.depth < max_depth:
-                self._expand(node, candidates_per_node)
+                candidates = self.generator.get_candidates(node.state, n=candidates_per_node)
+                for candidate in candidates:
+                    self.metrics.total_nodes += 1
+                    self.metrics.total_tokens += len(candidate.split())
 
-            reward = self._simulate(node)
-            self._backpropagate(node, reward)
+                    is_valid, _ = self.verifier.verify(candidate)
+                    if is_valid:
+                        node.children.append(
+                            MCTSNode(state=node.state + "\n" + candidate, parent=node)
+                        )
+                    else:
+                        self.metrics.pruned_nodes += 1
+
+            # Simulate
+            reward = self._score(node.state)
+
+            # Backpropagate
+            current = node
+            while current:
+                current.visits += 1
+                current.value += reward
+                current = current.parent
+
             self.metrics.iterations_completed = i + 1
-
-            if self._is_solution_complete(node):
+            if self._has_answer(node.state):
                 break
 
-        self.metrics.search_time = time.time() - start_time
-        return self._get_best_path(root)
+        self.metrics.search_time = time.time() - start
 
-    def _format_prompt(self, problem: str) -> str:
-        """Format problem with system prompt for math solving."""
-        return f"""Solve this math problem step by step. Show your reasoning clearly.
-After solving, write your final answer as: Final Answer: [answer]
-
-Problem: {problem}
-
-Solution:"""
-
-    def _select(self, root: MCTSNode) -> MCTSNode:
-        """Select the most promising node using UCT."""
-        node = root
-        while node.children:
-            node = max(node.children, key=lambda c: c.uct())
-        return node
-
-    def _expand(self, node: MCTSNode, n_candidates: int) -> None:
-        """Generate and verify candidate expansions."""
-        candidates = self.generator.get_candidates(node.state, n=n_candidates)
-
-        for candidate in candidates:
-            self.metrics.total_nodes += 1
-            self.metrics.total_tokens += len(candidate.split())
-
-            is_valid, reason = self.verifier.verify(candidate)
-            if is_valid:
-                child = MCTSNode(
-                    state=node.state + "\n" + candidate,
-                    parent=node
-                )
-                node.children.append(child)
-            else:
-                self.metrics.pruned_nodes += 1
-
-    def _simulate(self, node: MCTSNode) -> float:
-        """Calculate reward based on solution quality."""
-        state = node.state.lower()
-
-        if "final answer:" in state:
-            return 1.0
-
-        if any(kw in state for kw in ["therefore", "thus", "hence", "so we have"]):
-            return 0.3
-
-        return 0.1
-
-    def _backpropagate(self, node: MCTSNode, reward: float) -> None:
-        """Propagate reward back up the tree."""
-        current = node
-        while current:
-            current.visits += 1
-            current.value += reward
-            current = current.parent
-
-    def _is_solution_complete(self, node: MCTSNode) -> bool:
-        """Check if current node contains a complete solution."""
-        return "final answer:" in node.state.lower()
-
-    def _get_best_path(self, root: MCTSNode) -> str:
-        """Return the state from the most visited leaf node."""
+        # Best path = most visited
         node = root
         while node.children:
             node = max(node.children, key=lambda c: c.visits)
         return node.state
 
+    def _score(self, state: str) -> float:
+        """Reward based on TIR solution progress."""
+        if self._has_answer(state):
+            return 1.0
+        if "```python" in state and "```output" in state:
+            return 0.5
+        if "```python" in state:
+            return 0.3
+        return 0.1
+
+    def _has_answer(self, text: str) -> bool:
+        """Check for \\boxed{} or Final Answer."""
+        return bool(re.search(r'\\boxed\{.+?\}', text)) or "final answer" in text.lower()
+
     def get_metrics(self) -> dict:
-        """Return search metrics for analysis."""
         return self.metrics.to_dict()

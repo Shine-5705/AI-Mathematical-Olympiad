@@ -40,8 +40,8 @@ class ExperimentRunner:
         results = []
 
         for idx, row in problems.iterrows():
-            problem = row.get("instruction") or row.get("problem")
-            expected = str(row.get("target") or row.get("expected_answer", ""))
+            problem = row["problem"]
+            expected = str(row["expected_answer"])
 
             logger.info(f"[{method_name}] Problem {idx + 1}/{len(problems)}")
 

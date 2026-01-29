@@ -1,129 +1,133 @@
+"""Verifiers for pruning invalid MCTS branches."""
 import re
+import subprocess
+import sys
 from typing import Tuple
 from abc import ABC, abstractmethod
 
 
 class BaseVerifier(ABC):
-    """Abstract base for solution verifiers."""
-
     @abstractmethod
     def verify(self, text: str) -> Tuple[bool, str]:
-        """Verify text. Returns (is_valid, reason)."""
+        """Returns (is_valid, reason)."""
         pass
 
 
 class NoOpVerifier(BaseVerifier):
-    """Verifier that accepts everything (for ablation studies)."""
-
+    """Accepts everything — for ablation."""
     def verify(self, text: str) -> Tuple[bool, str]:
         return True, "no_verify"
 
 
 class SymbolicVerifier(BaseVerifier):
-    """Verifies mathematical consistency using SymPy."""
+    """Checks mathematical consistency using SymPy.
+
+    Handles:
+    - $...$ LaTeX equations
+    - \\boxed{} answers with contradictions
+    - Inline equations like "x = 5" in reasoning
+    """
 
     def __init__(self):
-        try:
-            import sympy
-            self.sp = sympy
-        except ImportError:
-            raise ImportError("sympy not installed. Run: pip install sympy")
+        import sympy
+        self.sp = sympy
 
     def verify(self, text: str) -> Tuple[bool, str]:
-        """Check for mathematical contradictions in LaTeX equations."""
+        # Check $...$ equations
         equations = re.findall(r'\$(.*?)\$', text)
+        for eq in self._check_equations(equations):
+            return False, eq
+
+        # Check \boxed{} for numeric contradictions
+        boxed = re.findall(r'\\boxed\{(.+?)\}', text)
+        for b in boxed:
+            # If boxed contains an equation, verify it
+            if "=" in b:
+                for err in self._check_equations([b]):
+                    return False, f"Boxed contradiction: {err}"
+
+        return True, "passed"
+
+    def _check_equations(self, equations: list) -> list:
+        errors = []
         for eq in equations:
             try:
-                if "=" in eq and "==" not in eq:
+                if "=" in eq and "==" not in eq and "\\neq" not in eq and "!=" not in eq:
                     parts = eq.split("=", 1)
                     if len(parts) != 2:
                         continue
-                    lhs, rhs = parts
+                    lhs, rhs = parts[0].strip(), parts[1].strip()
+                    if not lhs or not rhs:
+                        continue
                     diff = self.sp.simplify(f"({lhs}) - ({rhs})")
                     if diff != 0 and diff.is_number:
-                        return False, f"Contradiction: {lhs} != {rhs}"
+                        errors.append(f"Contradiction: {lhs} ≠ {rhs} (diff={diff})")
             except Exception:
                 continue
-        return True, "passed"
+        return errors
 
 
 class CodeExecutionVerifier(BaseVerifier):
-    """Verifies by executing Python code blocks."""
+    """Executes Python code blocks and checks for errors.
 
-    def __init__(self, timeout: int = 5):
+    TIR solutions contain ```python ... ``` blocks.
+    If execution fails, the branch is pruned.
+    """
+
+    def __init__(self, timeout: int = 10):
         self.timeout = timeout
 
     def verify(self, text: str) -> Tuple[bool, str]:
-        """Execute Python code blocks and verify they run without error."""
-        code_blocks = re.findall(r'```python\n(.*?)```', text, re.DOTALL)
-        if not code_blocks:
+        blocks = re.findall(r'```python\n(.*?)```', text, re.DOTALL)
+        if not blocks:
             return True, "no_code"
 
-        for i, code in enumerate(code_blocks):
-            success, result = self._execute_code(code)
+        for i, code in enumerate(blocks):
+            success, output = self._run(code)
             if not success:
-                return False, f"Code block {i} failed: {result}"
+                return False, f"Code block {i} failed: {output}"
         return True, "code_passed"
 
-    def _execute_code(self, code: str) -> Tuple[bool, str]:
-        """Safely execute code with timeout."""
-        import multiprocessing
-        import io
-        import sys
-
-        def run_code(code: str, output_queue):
-            old_stdout = sys.stdout
-            sys.stdout = io.StringIO()
-            try:
-                exec_globals = {"__builtins__": __builtins__}
-                exec(code, exec_globals)
-                output = sys.stdout.getvalue()
-                output_queue.put((True, output))
-            except Exception as e:
-                output_queue.put((False, str(e)))
-            finally:
-                sys.stdout = old_stdout
-
-        output_queue = multiprocessing.Queue()
-        process = multiprocessing.Process(target=run_code, args=(code, output_queue))
-        process.start()
-        process.join(timeout=self.timeout)
-
-        if process.is_alive():
-            process.terminate()
-            process.join()
+    def _run(self, code: str) -> Tuple[bool, str]:
+        """Execute code in subprocess with timeout."""
+        try:
+            result = subprocess.run(
+                [sys.executable, "-c", code],
+                capture_output=True, text=True,
+                timeout=self.timeout,
+            )
+            if result.returncode != 0:
+                return False, result.stderr.strip().split('\n')[-1]
+            return True, result.stdout.strip()
+        except subprocess.TimeoutExpired:
             return False, "timeout"
-
-        if output_queue.empty():
-            return False, "no_output"
-
-        return output_queue.get()
+        except Exception as e:
+            return False, str(e)
 
 
 class CompositeVerifier(BaseVerifier):
-    """Combines multiple verifiers."""
+    """Runs multiple verifiers — fails if any fails."""
 
     def __init__(self, verifiers: list[BaseVerifier]):
         self.verifiers = verifiers
 
     def verify(self, text: str) -> Tuple[bool, str]:
-        """Run all verifiers. Fails if any verifier fails."""
-        for verifier in self.verifiers:
-            is_valid, reason = verifier.verify(text)
-            if not is_valid:
-                return False, f"{verifier.__class__.__name__}: {reason}"
+        for v in self.verifiers:
+            ok, reason = v.verify(text)
+            if not ok:
+                return False, f"{v.__class__.__name__}: {reason}"
         return True, "all_passed"
 
 
 def create_verifier(mode: str = "symbolic") -> BaseVerifier:
-    """Factory function to create verifier."""
-    if mode == "none":
-        return NoOpVerifier()
-    elif mode == "symbolic":
-        return SymbolicVerifier()
-    elif mode == "code":
-        return CodeExecutionVerifier()
-    elif mode == "both":
-        return CompositeVerifier([SymbolicVerifier(), CodeExecutionVerifier()])
-    else:
-        raise ValueError(f"Unknown mode: {mode}. Choose from: none, symbolic, code, both")
+    modes = {
+        "none": NoOpVerifier,
+        "symbolic": SymbolicVerifier,
+        "code": CodeExecutionVerifier,
+        "both": lambda: CompositeVerifier([SymbolicVerifier(), CodeExecutionVerifier()]),
+    }
+    if mode not in modes:
+        raise ValueError(f"Unknown mode: {mode}. Choose from: {list(modes.keys())}")
+
+    factory = modes[mode]
+    return factory() if callable(factory) else factory

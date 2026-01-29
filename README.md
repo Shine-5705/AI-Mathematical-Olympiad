@@ -1,6 +1,6 @@
 # Deductive-State MCTS for Mathematical Reasoning
 
-Fine-tune NuminaMath (2024) on OpenMathReasoning (2026), then improve it with MCTS-guided rejection sampling.
+Fine-tune NuminaMath on OpenMathReasoning, then improve it with MCTS-guided rejection sampling.
 
 ## Setup
 
@@ -20,7 +20,21 @@ pip install -r requirements-cuda.txt
 python -m src.data.pipeline
 ```
 
-### Step 2: SFT Training (baseline — what Numina did)
+### Step 2 (Mac only): Convert NuminaMath to MLX
+
+```bash
+# Convert + quantize to 4-bit (fits in 16GB RAM)
+python convert_model.py
+
+# Or specify a different model
+python convert_model.py --model Qwen/Qwen2.5-Math-7B-Instruct --bits 4
+```
+
+Output: `models/mlx/NuminaMath-7B-TIR-4bit`
+
+On Linux this step is not needed — QLoRA handles quantization at load time.
+
+### Step 3: SFT Training (baseline — what Numina did)
 
 ```bash
 python train.py --mode sft --epochs 3
@@ -29,9 +43,13 @@ python train.py --mode sft --epochs 3
 python train.py --mode sft --limit 100 --epochs 1
 ```
 
+Auto-detects platform:
+- Mac → uses converted MLX model from Step 2 (or falls back to Qwen2.5-Math)
+- Linux → uses NuminaMath-7B-TIR with QLoRA
+
 Output: `models/sft/lora_adapter`
 
-### Step 3: MCTS-RL Training (our contribution)
+### Step 4: MCTS-RL Training (our contribution)
 
 ```bash
 python train.py --mode mcts-rl --sft-model models/sft/lora_adapter --epochs 2
@@ -48,7 +66,7 @@ This does:
 
 Output: `models/mcts_rl/lora_adapter`
 
-### Step 4: Compare Results
+### Step 5: Compare Results
 
 ```bash
 python run_experiment.py --limit 20
@@ -58,6 +76,14 @@ Compares three models head-to-head:
 - `NuminaMath (base)` — original model, no training
 - `SFT` — fine-tuned on OpenMathReasoning
 - `MCTS-RL (ours)` — fine-tuned with verified MCTS solutions
+
+## Platform Summary
+
+| Platform | Model | Quantization | RAM/VRAM |
+|----------|-------|-------------|----------|
+| Mac M-series | NuminaMath-7B (converted) | MLX 4-bit | ~5GB |
+| Mac M-series | Qwen2.5-Math-7B (fallback) | MLX 4-bit | ~5GB |
+| Linux NVIDIA | NuminaMath-7B-TIR | QLoRA 4-bit | ~6GB |
 
 ## What Gets Produced
 
@@ -73,13 +99,16 @@ Compares three models head-to-head:
 ## Project Structure
 
 ```
+├── convert_model.py            # HF → MLX conversion (Mac)
 ├── train.py                    # --mode sft | --mode mcts-rl
 ├── run_experiment.py           # Compare base vs SFT vs MCTS-RL
 ├── src/
 │   ├── data/pipeline.py        # OpenMathReasoning → TIR format
 │   ├── training/
-│   │   ├── sft.py              # Standard supervised fine-tuning
-│   │   └── mcts_rl.py          # MCTS-guided rejection sampling + RL
+│   │   ├── sft.py              # SFT with MLX (Mac)
+│   │   ├── sft_cuda.py         # SFT with QLoRA (Linux)
+│   │   ├── mcts_rl.py          # MCTS-RL with MLX (Mac)
+│   │   └── mcts_rl_cuda.py     # MCTS-RL with QLoRA (Linux)
 │   ├── search/
 │   │   ├── mcts.py             # MCTS algorithm
 │   │   ├── generator.py        # LLM backends (transformers/mlx/vllm)
@@ -89,6 +118,7 @@ Compares three models head-to-head:
 │       ├── runner.py           # Experiment orchestration
 │       └── plots.py            # Publication-quality charts
 ├── models/
+│   ├── mlx/                    # Converted MLX models
 │   ├── sft/                    # SFT model output
 │   └── mcts_rl/                # MCTS-RL model output
 └── experiments/                # Experiment results

@@ -5,9 +5,9 @@ from typing import Optional, List, Dict, Any
 def extract_answer(text: str) -> Optional[str]:
     """Extract final answer from solution text."""
     patterns = [
+        r'\\boxed\{([^}]+)\}',
         r'final answer[:\s]*\$?([^\n\$]+)\$?',
         r'answer is[:\s]*\$?([^\n\$]+)\$?',
-        r'\\boxed\{([^}]+)\}',
         r'= ([0-9]+)\s*$',
     ]
 
