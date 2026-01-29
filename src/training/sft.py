@@ -1,7 +1,6 @@
-"""Standard Supervised Fine-Tuning on TIR data (what Numina did)."""
+"""SFT training using MLX on Apple Silicon."""
 import json
 import logging
-import math
 from pathlib import Path
 
 import pandas as pd
@@ -11,24 +10,24 @@ logger = logging.getLogger(__name__)
 
 
 class SFTTrainer:
-    """QLoRA SFT: fine-tune NuminaMath on OpenMathReasoning TIR format."""
+    """LoRA SFT using MLX — runs on Mac M-series natively."""
 
     def __init__(
         self,
-        model_id: str = "AI-MO/NuminaMath-7B-TIR",
+        model_id: str = "mlx-community/Qwen2.5-Math-7B-Instruct-4bit",
         output_dir: str = "models/sft",
     ):
         self.model_id = model_id
         self.output_dir = Path(output_dir)
         self.output_dir.mkdir(parents=True, exist_ok=True)
 
-    def prepare_dataset(self, parquet_path: str, limit: int = None):
-        """Load TIR data and split train/eval."""
+    def prepare_data(self, parquet_path: str, limit: int = None):
+        """Convert parquet to JSONL files for MLX training."""
         df = pd.read_parquet(parquet_path)
         if limit:
             df = df.head(limit)
 
-        dataset = []
+        records = []
         for _, row in df.iterrows():
             tir_text = row.get("tir_text")
             if not tir_text:
@@ -38,168 +37,143 @@ class SFTTrainer:
                     continue
                 from src.data.pipeline import format_tir_chat
                 tir_text = format_tir_chat(problem, solution)
+            records.append({"text": tir_text})
 
-            dataset.append({
-                "text": tir_text,
-                "expected_answer": str(row.get("expected_answer", "")),
-            })
+        split = int(len(records) * 0.9)
+        valid_split = split + (len(records) - split) // 2
 
-        split = int(len(dataset) * 0.9)
-        logger.info(f"Train: {split} | Eval: {len(dataset) - split}")
-        return dataset[:split], dataset[split:]
+        data_dir = self.output_dir / "data"
+        data_dir.mkdir(parents=True, exist_ok=True)
+
+        for name, data in [
+            ("train", records[:split]),
+            ("valid", records[split:valid_split]),
+            ("test", records[valid_split:]),
+        ]:
+            path = data_dir / f"{name}.jsonl"
+            with open(path, "w") as f:
+                for r in data:
+                    f.write(json.dumps(r) + "\n")
+            logger.info(f"{name}: {len(data)} examples → {path}")
+
+        return str(data_dir)
 
     def train(
         self,
         parquet_path: str,
         epochs: int = 3,
         batch_size: int = 1,
-        learning_rate: float = 2e-4,
+        learning_rate: float = 1e-5,
         limit: int = None,
     ) -> dict:
-        """Run SFT training."""
-        import torch
-        from transformers import (
-            AutoModelForCausalLM,
-            AutoTokenizer,
-            TrainingArguments,
-            Trainer,
-            DataCollatorForLanguageModeling,
-        )
-        from peft import LoraConfig, get_peft_model, prepare_model_for_kbit_training
-        from datasets import Dataset
+        """Run LoRA fine-tuning with MLX."""
+        import mlx.core as mx
+        from mlx_lm import load
+        from mlx_lm.tuner.trainer import TrainingArgs, train as mlx_train
+        from mlx_lm.tuner.utils import linear_to_lora_layers
+        from mlx_lm.tuner.datasets import load_dataset as load_mlx_dataset
         from src.evaluation.plots import plot_training_loss
 
-        train_data, eval_data = self.prepare_dataset(parquet_path, limit)
+        data_dir = self.prepare_data(parquet_path, limit)
 
         logger.info(f"Loading {self.model_id}...")
-        tokenizer = AutoTokenizer.from_pretrained(self.model_id, trust_remote_code=True)
-        if tokenizer.pad_token is None:
-            tokenizer.pad_token = tokenizer.eos_token
+        model, tokenizer = load(self.model_id)
 
-        # Load model with quantization if CUDA available
-        if torch.cuda.is_available():
-            from transformers import BitsAndBytesConfig
-            model = AutoModelForCausalLM.from_pretrained(
-                self.model_id,
-                quantization_config=BitsAndBytesConfig(
-                    load_in_4bit=True,
-                    bnb_4bit_quant_type="nf4",
-                    bnb_4bit_compute_dtype=torch.float16,
-                ),
-                device_map="auto",
-                trust_remote_code=True,
-            )
-            model = prepare_model_for_kbit_training(model)
-        else:
-            model = AutoModelForCausalLM.from_pretrained(
-                self.model_id,
-                torch_dtype=torch.float16,
-                device_map="auto",
-                trust_remote_code=True,
-            )
-
-        # LoRA adapters
-        model = get_peft_model(model, LoraConfig(
-            r=16,
-            lora_alpha=32,
-            target_modules=["q_proj", "k_proj", "v_proj", "o_proj"],
-            lora_dropout=0.05,
-            bias="none",
-            task_type="CAUSAL_LM",
-        ))
-
-        total_params = sum(p.numel() for p in model.parameters())
-        trainable_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
-        logger.info(f"Trainable: {trainable_params:,} / {total_params:,} ({trainable_params/total_params:.2%})")
-
-        # Tokenize
-        def tokenize(example):
-            tokens = tokenizer(example["text"], truncation=True, max_length=2048, padding="max_length")
-            tokens["labels"] = tokens["input_ids"].copy()
-            return tokens
-
-        train_ds = Dataset.from_list(train_data).map(tokenize, remove_columns=["text", "expected_answer"])
-        eval_ds = Dataset.from_list(eval_data).map(tokenize, remove_columns=["text", "expected_answer"])
-
-        steps_per_epoch = max(1, len(train_ds) // (batch_size * 4))
-        eval_steps = max(1, steps_per_epoch // 2)
-
-        trainer = Trainer(
-            model=model,
-            args=TrainingArguments(
-                output_dir=str(self.output_dir / "checkpoints"),
-                num_train_epochs=epochs,
-                per_device_train_batch_size=batch_size,
-                per_device_eval_batch_size=batch_size,
-                gradient_accumulation_steps=4,
-                learning_rate=learning_rate,
-                warmup_ratio=0.1,
-                weight_decay=0.01,
-                fp16=torch.cuda.is_available(),
-                logging_steps=5,
-                eval_strategy="steps",
-                eval_steps=eval_steps,
-                save_steps=eval_steps,
-                save_total_limit=2,
-                load_best_model_at_end=True,
-                metric_for_best_model="eval_loss",
-                report_to="none",
-            ),
-            train_dataset=train_ds,
-            eval_dataset=eval_ds,
-            data_collator=DataCollatorForLanguageModeling(tokenizer, mlm=False),
+        # Apply LoRA
+        lora_config = {
+            "rank": 16,
+            "alpha": 32,
+            "dropout": 0.05,
+            "scale": 32.0 / 16.0,
+        }
+        linear_to_lora_layers(
+            model,
+            num_lora_layers=16,
+            config=lora_config,
         )
 
+        trainable = sum(p.size for n, p in model.trainable_parameters().items())
+        total = sum(p.size for n, p in model.parameters().items())
+        logger.info(f"Trainable: {trainable:,} / {total:,} ({trainable/total:.2%})")
+
+        # Load datasets
+        train_ds, valid_ds, test_ds = load_mlx_dataset(
+            data=data_dir,
+            tokenizer=tokenizer,
+        )
+
+        # Callback to collect losses
+        train_losses = []
+        eval_losses = []
+
+        adapter_path = str(self.output_dir / "lora_adapter")
+
+        training_args = TrainingArguments(
+            batch_size=batch_size,
+            iters=len(train_ds) * epochs,
+            val_batches=25,
+            steps_per_report=10,
+            steps_per_eval=100,
+            save_every=200,
+            adapter_path=adapter_path,
+            learning_rate=learning_rate,
+            max_seq_length=2048,
+        )
+
+        # Train
         logger.info("Starting SFT training...")
-        result = trainer.train()
+        model.train()
+        mlx_train(
+            model=model,
+            tokenizer=tokenizer,
+            args=training_args,
+            train_dataset=train_ds,
+            val_dataset=valid_ds,
+        )
 
-        # Collect metrics
-        eval_result = trainer.evaluate()
-        eval_loss = eval_result["eval_loss"]
-        log_history = trainer.state.log_history
-        train_losses = [(l["step"], l["loss"]) for l in log_history if "loss" in l]
-        eval_losses = [(l["step"], l["eval_loss"]) for l in log_history if "eval_loss" in l]
+        # Evaluate on test set
+        model.eval()
+        from mlx_lm.tuner.trainer import evaluate as mlx_evaluate
+        test_loss = mlx_evaluate(
+            model=model,
+            dataset=test_ds,
+            tokenizer=tokenizer,
+            batch_size=batch_size,
+            num_batches=len(test_ds),
+            max_seq_length=2048,
+        )
 
+        # Read training log if available
+        log_path = Path(adapter_path) / "adapter_config.json"
         metrics = {
             "mode": "sft",
             "model": self.model_id,
-            "train_examples": len(train_ds),
-            "eval_examples": len(eval_ds),
+            "trainable_params": trainable,
+            "trainable_pct": round(trainable / total * 100, 2),
+            "total_params": total,
+            "test_loss": round(test_loss, 4),
+            "lora_rank": lora_config["rank"],
+            "lora_alpha": lora_config["alpha"],
             "epochs": epochs,
-            "trainable_params": trainable_params,
-            "trainable_pct": round(trainable_params / total_params * 100, 2),
-            "final_train_loss": round(result.training_loss, 4),
-            "final_eval_loss": round(eval_loss, 4),
-            "eval_perplexity": round(math.exp(eval_loss), 2) if eval_loss < 10 else float('inf'),
-            "train_loss_history": train_losses,
-            "eval_loss_history": eval_losses,
+            "learning_rate": learning_rate,
         }
-
-        # Save
-        save_path = self.output_dir / "lora_adapter"
-        model.save_pretrained(save_path)
-        tokenizer.save_pretrained(save_path)
 
         with open(self.output_dir / "training_metrics.json", "w") as f:
             json.dump(metrics, f, indent=2)
-
-        plot_training_loss(train_losses, eval_losses, str(self.output_dir / "loss_curve.png"))
 
         self._print_summary(metrics)
         return metrics
 
     def _print_summary(self, m):
         print("\n" + "=" * 60)
-        print("SFT TRAINING RESULTS")
+        print("SFT TRAINING RESULTS (MLX)")
         print("=" * 60)
-        print(f"  Model:            {m['model']}")
-        print(f"  Train/Eval:       {m['train_examples']} / {m['eval_examples']}")
-        print(f"  Trainable:        {m['trainable_params']:,} ({m['trainable_pct']}%)")
+        print(f"  Model:         {m['model']}")
+        print(f"  Trainable:     {m['trainable_params']:,} ({m['trainable_pct']}%)")
+        print(f"  LoRA rank:     {m['lora_rank']}")
         print("-" * 60)
-        print(f"  Train Loss:       {m['final_train_loss']}")
-        print(f"  Eval Loss:        {m['final_eval_loss']}")
-        print(f"  Perplexity:       {m['eval_perplexity']}")
+        print(f"  Test Loss:     {m['test_loss']}")
         print("=" * 60)
-        print(f"  Saved to:         {self.output_dir / 'lora_adapter'}")
-        print(f"  Loss curve:       {self.output_dir / 'loss_curve.png'}")
+        print(f"  Adapter:       {self.output_dir / 'lora_adapter'}")
+        print(f"  Metrics:       {self.output_dir / 'training_metrics.json'}")
         print("=" * 60)

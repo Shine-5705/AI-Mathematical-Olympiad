@@ -1,5 +1,5 @@
 """
-Train NuminaMath on OpenMathReasoning.
+Train math reasoning model on Mac M-series with MLX.
 
 Two modes:
   sft      - Standard supervised fine-tuning (what Numina did)
@@ -16,10 +16,10 @@ def main():
     parser = argparse.ArgumentParser(description="Train math reasoning model")
     parser.add_argument("--mode", choices=["sft", "mcts-rl"], required=True)
     parser.add_argument("--data", default="data/processed/math_reasoning_tir.parquet")
-    parser.add_argument("--model", default="AI-MO/NuminaMath-7B-TIR")
+    parser.add_argument("--model", default="mlx-community/Qwen2.5-Math-7B-Instruct-4bit")
     parser.add_argument("--epochs", type=int, default=3)
     parser.add_argument("--batch-size", type=int, default=1)
-    parser.add_argument("--lr", type=float, default=2e-4)
+    parser.add_argument("--lr", type=float, default=1e-5)
     parser.add_argument("--limit", type=int, default=None)
 
     # MCTS-RL specific
@@ -45,7 +45,7 @@ def main():
         from src.training import MCTSRLTrainer
 
         trainer = MCTSRLTrainer(
-            sft_model_path=args.sft_model,
+            sft_adapter_path=args.sft_model,
             base_model_id=args.model,
             output_dir="models/mcts_rl",
         )
