@@ -5,12 +5,14 @@ description = "MCTS-based math solver with symbolic verification"
 readme = "README.md"
 requires-python = ">=3.11"
 dependencies = [
+    "accelerate>=1.12.0",
     "datasets>=4.0.0",
     "fastparquet>=2024.0.0",
     "fsspec>=2024.0.0",
     "huggingface-hub>=0.20.0",
     "numpy>=1.26.0",
     "pandas>=2.0.0",
+    "peft>=0.18.1",
     "pyarrow>=15.0.0",
     "python-dotenv>=1.0.0",
     "sympy>=1.12.0",
