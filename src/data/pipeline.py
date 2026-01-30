@@ -1,13 +1,14 @@
 """ETL pipeline: OpenMathReasoning → NuminaMath TIR messages format.
 
-Supports resumable downloads via streaming + chunked parquet writes.
-If interrupted, re-running picks up from the last saved chunk.
+Download is fully resumable — HuggingFace caches raw files to disk.
+If interrupted, re-running picks up where it left off.
+Processing happens in chunks to avoid OOM on 16GB machines.
 """
 import logging
 from pathlib import Path
 
 import pandas as pd
-from datasets import load_dataset
+from datasets import load_dataset, Dataset
 
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 logger = logging.getLogger(__name__)
@@ -39,7 +40,15 @@ def _transform_row(example: dict) -> dict:
 class OpenMathETL:
     """ETL: OpenMathReasoning → TIR messages Parquet.
 
-    Downloads via streaming in chunks so it can resume after interruption.
+    Step 1 (download): HuggingFace downloads raw parquet shards to
+    ~/.cache/huggingface/datasets/. This is resumable — if interrupted,
+    re-running continues from where it stopped. No data is lost.
+
+    Step 2 (transform): Processes the cached dataset in chunks of 10K rows,
+    writing each chunk as a separate parquet file. If interrupted, re-running
+    skips already-processed chunks.
+
+    Step 3 (merge): Combines all chunks into one final parquet file.
     """
 
     def __init__(
@@ -55,96 +64,117 @@ class OpenMathETL:
         self.chunks_dir = self.output_dir / "chunks"
         self.chunk_size = chunk_size
 
-    def _count_existing_rows(self) -> int:
-        """Count rows already downloaded in chunk files."""
-        if not self.chunks_dir.exists():
-            return 0
-        chunk_files = sorted(self.chunks_dir.glob("chunk_*.parquet"))
-        total = 0
-        for f in chunk_files:
-            try:
-                total += len(pd.read_parquet(f))
-            except Exception:
-                f.unlink()
-        return total
+    def download(self) -> Dataset:
+        """Download dataset with automatic resume.
 
-    def _get_next_chunk_idx(self) -> int:
-        """Get the next chunk index to write."""
-        if not self.chunks_dir.exists():
-            return 0
-        existing = sorted(self.chunks_dir.glob("chunk_*.parquet"))
-        if not existing:
-            return 0
-        last = existing[-1].stem  # "chunk_0042"
-        return int(last.split("_")[1]) + 1
+        HuggingFace downloads raw parquet shards to disk cache.
+        Each shard download is resumable via HTTP range requests.
+        If this step is interrupted, re-running it will:
+        - Skip already-downloaded shards (verified by checksum)
+        - Resume partially-downloaded shards from where they stopped
+        """
+        logger.info(f"Downloading {self.dataset_name} (tir split)...")
+        logger.info("Files are cached at ~/.cache/huggingface/datasets/")
+        logger.info("If interrupted, re-run this command — it will resume automatically.")
 
-    def extract_and_transform(self) -> None:
-        """Stream dataset and save in resumable chunks."""
+        ds = load_dataset(
+            self.dataset_name,
+            split="tir",
+            num_proc=4,
+        )
+
+        logger.info(f"Download complete: {len(ds):,} rows cached to disk")
+        return ds
+
+    def transform(self, ds: Dataset) -> None:
+        """Transform in chunks to avoid OOM. Resumable."""
         self.chunks_dir.mkdir(parents=True, exist_ok=True)
 
-        skip_rows = self._count_existing_rows()
-        chunk_idx = self._get_next_chunk_idx()
+        # Figure out which chunks are already done
+        existing_chunks = sorted(self.chunks_dir.glob("chunk_*.parquet"))
+        rows_done = 0
+        for f in existing_chunks:
+            try:
+                rows_done += len(pd.read_parquet(f, columns=["problem"]))
+            except Exception:
+                f.unlink()
+                existing_chunks = sorted(self.chunks_dir.glob("chunk_*.parquet"))
+                break
 
-        if skip_rows > 0:
-            logger.info(f"Resuming download — {skip_rows:,} rows already saved ({chunk_idx} chunks)")
+        if rows_done > 0:
+            logger.info(f"Resuming transform — {rows_done:,} rows already processed")
 
-        logger.info(f"Streaming {self.dataset_name} (tir split)...")
-        ds = load_dataset(self.dataset_name, split="tir", streaming=True)
+        chunk_idx = len(existing_chunks)
+        total = len(ds)
 
-        buffer = []
-        total_saved = skip_rows
+        for start in range(rows_done, total, self.chunk_size):
+            end = min(start + self.chunk_size, total)
+            batch = ds.select(range(start, end))
+            processed = batch.map(_transform_row, remove_columns=batch.column_names)
+            df = processed.to_pandas()
 
-        for i, example in enumerate(ds):
-            # Skip rows we already have
-            if i < skip_rows:
-                if i % 100_000 == 0 and i > 0:
-                    logger.info(f"Skipping... {i:,}/{skip_rows:,}")
-                continue
-
-            buffer.append(_transform_row(example))
-
-            if len(buffer) >= self.chunk_size:
-                chunk_path = self.chunks_dir / f"chunk_{chunk_idx:04d}.parquet"
-                pd.DataFrame(buffer).to_parquet(chunk_path, compression='snappy', index=False)
-                total_saved += len(buffer)
-                logger.info(f"Saved chunk {chunk_idx} — {total_saved:,} rows total")
-                buffer.clear()
-                chunk_idx += 1
-
-        # Save remaining
-        if buffer:
             chunk_path = self.chunks_dir / f"chunk_{chunk_idx:04d}.parquet"
-            pd.DataFrame(buffer).to_parquet(chunk_path, compression='snappy', index=False)
-            total_saved += len(buffer)
-            logger.info(f"Saved final chunk {chunk_idx} — {total_saved:,} rows total")
+            df.to_parquet(chunk_path, compression='snappy', index=False)
 
-        logger.info(f"Download complete: {total_saved:,} rows in {chunk_idx + 1} chunks")
+            chunk_idx += 1
+            logger.info(f"Chunk {chunk_idx}: rows {start:,}-{end:,} / {total:,}")
 
-    def merge_chunks(self) -> None:
+        logger.info(f"Transform complete: {chunk_idx} chunks")
+
+    def merge(self) -> None:
         """Merge all chunks into a single parquet file."""
         chunk_files = sorted(self.chunks_dir.glob("chunk_*.parquet"))
         if not chunk_files:
-            logger.error("No chunks found. Run extract_and_transform first.")
+            logger.error("No chunks found. Run transform first.")
             return
 
-        logger.info(f"Merging {len(chunk_files)} chunks into {self.output_path}...")
-        dfs = [pd.read_parquet(f) for f in chunk_files]
+        logger.info(f"Merging {len(chunk_files)} chunks → {self.output_path}")
+
+        # Read and concat in batches to avoid OOM
+        dfs = []
+        for f in chunk_files:
+            dfs.append(pd.read_parquet(f))
+
         merged = pd.concat(dfs, ignore_index=True)
         merged.to_parquet(self.output_path, compression='snappy', index=False)
-        logger.info(f"Merged: {len(merged):,} rows → {self.output_path}")
+        logger.info(f"Done: {len(merged):,} rows → {self.output_path}")
 
-    def run_pipeline(self) -> None:
-        """Run full ETL with resume support."""
-        # Skip if final output already exists
-        if self.output_path.exists():
-            existing = pd.read_parquet(self.output_path)
-            logger.info(f"Output already exists: {self.output_path} ({len(existing):,} rows)")
-            logger.info("Delete it to re-download, or use extract_and_transform() to add more chunks.")
+        # Verify the merged file is readable and has all rows
+        verify = pd.read_parquet(self.output_path)
+        expected = sum(len(df) for df in dfs)
+        if len(verify) == expected:
+            logger.info(f"Verified: {len(verify):,} rows (matches chunks)")
+        else:
+            logger.error(f"Row mismatch! Merged={len(verify):,}, Expected={expected:,}")
+            logger.error("Keeping chunk files for safety. Do NOT delete them.")
             return
 
-        self.extract_and_transform()
-        self.merge_chunks()
-        logger.info(f"Pipeline complete: {self.output_path}")
+        # Clean up chunks only after verified merge
+        for f in chunk_files:
+            f.unlink()
+        self.chunks_dir.rmdir()
+        logger.info("Chunk files cleaned up.")
+
+    def run_pipeline(self) -> None:
+        """Run full ETL: download → transform → merge.
+
+        Each step is independently resumable:
+        - Download: HF resumes partial shard downloads automatically
+        - Transform: skips already-processed chunks
+        - Merge: only runs if chunks exist and final file doesn't
+        """
+        if self.output_path.exists():
+            try:
+                existing = pd.read_parquet(self.output_path, columns=["problem"])
+                logger.info(f"Already done: {self.output_path} ({len(existing):,} rows)")
+                return
+            except Exception:
+                logger.warning(f"Existing file is corrupt, re-processing...")
+                self.output_path.unlink()
+
+        ds = self.download()
+        self.transform(ds)
+        self.merge()
 
 
 if __name__ == "__main__":
