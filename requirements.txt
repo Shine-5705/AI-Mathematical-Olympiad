@@ -12,3 +12,5 @@ transformers
 torch
 peft
 accelerate
+matplotlib
+bitsandbytes
