@@ -1,0 +1,16 @@
+datasets
+fastparquet
+fsspec
+huggingface-hub
+numpy
+pandas
+pyarrow
+python-dotenv
+sympy
+tqdm
+transformers
+torch
+peft
+accelerate
+matplotlib
+bitsandbytes
