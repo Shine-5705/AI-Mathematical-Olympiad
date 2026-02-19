@@ -37,13 +37,21 @@
 - [x] Answer matching (numeric tolerance + symbolic)
 - [x] Python code block execution (subprocess, 10s timeout)
 - [x] Solution scoring (answer presence + code pass/fail)
+- [x] **Fix: outer paren stripping** — `(frac13)` now matches `frac13` (fixes ~14 problems)
+- [x] **Fix: dfrac → frac normalization** (fixes problem 39)
+- [x] **Fix: `\left`/`\right` handling** — `\left(\frac{1}{2}\right)` now matches `\frac{1}{2}`
+- [x] **Fix: `\frac{a}{b}` → `(a)/(b)` conversion** — enables SymPy to evaluate fractions
+- [x] **Fix: SymPy symbolic comparison** — `(π-2)/2` now matches `π/2-1` (fixes ~3 problems)
+- [x] **Fix: multi-value set comparison** — `(2,7),(3,17)` matches `((2,7)) and ((3,17))` (fixes ~12 problems)
+- [x] **Fix: score_solution** — per-block rewards (1.5/block) + heavier penalty (-2/fail)
 
 ### Best-of-N Solver
 - [x] Prompt builder with system prompt
 - [x] Best-of-N generation (N=16, temperature=0.7, top_p=0.95)
 - [x] Weighted majority vote (votes weighted by solution score)
-- [x] Baseline benchmark on 100 problems
-- [ ] Record and save baseline accuracy results
+- [x] Baseline benchmark on 100 problems (~8% accuracy with broken evaluator)
+- [x] **Fix: SYSTEM_PROMPT** — now requires Python/sympy for all computations + answer verification
+- [x] **Fix: MAX_TOKENS** — increased 2048 → 4096 for code + verification room
 
 ### Beam Search Solver
 - [x] Step-by-step continuation generation
