@@ -1,0 +1,9 @@
+{
+  "model": "qingy2024/Qwen2.5-Math-14B-Instruct-Preview",
+  "dataset": "nvidia/OpenMathReasoning (tir)",
+  "n_problems": 100,
+  "solutions_per": 16,
+  "accuracy": 0.2,
+  "coverage": 0.32,
+  "time_s": 3625.1
+}

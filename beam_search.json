@@ -1,0 +1,11 @@
+{
+  "model": "qingy2024/Qwen2.5-Math-14B-Instruct-Preview",
+  "dataset": "nvidia/OpenMathReasoning (tir)",
+  "method": "beam_search",
+  "beam_width": 4,
+  "max_steps": 5,
+  "accuracy": 0.13,
+  "coverage": 0.31,
+  "time_s": 7942.2,
+  "baseline_accuracy": 0.2
+}

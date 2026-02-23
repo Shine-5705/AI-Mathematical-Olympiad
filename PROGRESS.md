@@ -53,13 +53,21 @@
 - [x] **Fix: SYSTEM_PROMPT** — now requires Python/sympy for all computations + answer verification
 - [x] **Fix: MAX_TOKENS** — increased 2048 → 4096 for code + verification room
 
+### TIR Solver (Tool-Integrated Reasoning)
+- [x] `_inject_code_output()` — finds last un-annotated code block, runs all accumulated code, injects `# Output:` comment
+- [x] `build_continuation_prompt()` — builds prompt to continue mid-solution (strips `<|im_end|>` so generation resumes)
+- [x] `solve_problem_tir()` — round 0: N drafts in parallel; rounds 1+: continue incomplete drafts with output injected
+- [x] Batch continuation (only incomplete drafts go to subsequent rounds — saves compute)
+- [x] Lower temperature on refinement rounds (0.7 → 0.6)
+- [ ] Run TIR benchmark (max_rounds=4, tokens_per_round=1024)
+- [ ] Compare TIR vs Best-of-N vs Beam Search
+
 ### Beam Search Solver
 - [x] Step-by-step continuation generation
 - [x] Per-step scoring (code exec + answer presence + length penalty)
 - [x] Beam pruning (keep top-k, discard rest)
 - [x] Majority vote across completed beams
 - [ ] Run full benchmark (beam_width=4, max_steps=5)
-- [ ] Compare beam search vs best-of-N results
 
 ---
 
