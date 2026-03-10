@@ -1,0 +1,12 @@
+{
+  "n_problems": 100,
+  "solutions_per": 10,
+  "accuracy_best_verification": 0.04,
+  "accuracy_majority_vote": 0.04,
+  "coverage": 0.04,
+  "answer_extraction_rate": 0.078,
+  "code_pass_rate": 0.8434,
+  "generation_time_s": 17.3,
+  "verification_time_s": 98.6,
+  "model": "Qwen/Qwen2.5-Math-7B-Instruct"
+}
